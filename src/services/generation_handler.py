@@ -368,7 +368,7 @@ MODEL_CONFIG = {
     "veo_3_1_r2v_fast": {
         "type": "video",
         "video_type": "r2v",
-        "model_key": "veo_3_1_r2v_fast",
+        "model_key": "veo_3_1_r2v_fast_landscape",
         "aspect_ratio": "VIDEO_ASPECT_RATIO_LANDSCAPE",
         "supports_images": True,
         "min_images": 0,
@@ -388,7 +388,7 @@ MODEL_CONFIG = {
     "veo_3_1_r2v_fast_ultra": {
         "type": "video",
         "video_type": "r2v",
-        "model_key": "veo_3_1_r2v_fast_ultra",
+        "model_key": "veo_3_1_r2v_fast_landscape_ultra",
         "aspect_ratio": "VIDEO_ASPECT_RATIO_LANDSCAPE",
         "supports_images": True,
         "min_images": 0,
@@ -408,7 +408,7 @@ MODEL_CONFIG = {
     "veo_3_1_r2v_fast_ultra_relaxed": {
         "type": "video",
         "video_type": "r2v",
-        "model_key": "veo_3_1_r2v_fast_ultra_relaxed",
+        "model_key": "veo_3_1_r2v_fast_landscape_ultra_relaxed",
         "aspect_ratio": "VIDEO_ASPECT_RATIO_LANDSCAPE",
         "supports_images": True,
         "min_images": 0,
@@ -544,7 +544,7 @@ MODEL_CONFIG = {
     "veo_3_1_r2v_fast_ultra_4k": {
         "type": "video",
         "video_type": "r2v",
-        "model_key": "veo_3_1_r2v_fast_ultra",
+        "model_key": "veo_3_1_r2v_fast_landscape_ultra",
         "aspect_ratio": "VIDEO_ASPECT_RATIO_LANDSCAPE",
         "supports_images": True,
         "min_images": 0,
@@ -566,7 +566,7 @@ MODEL_CONFIG = {
     "veo_3_1_r2v_fast_ultra_1080p": {
         "type": "video",
         "video_type": "r2v",
-        "model_key": "veo_3_1_r2v_fast_ultra",
+        "model_key": "veo_3_1_r2v_fast_landscape_ultra",
         "aspect_ratio": "VIDEO_ASPECT_RATIO_LANDSCAPE",
         "supports_images": True,
         "min_images": 0,
@@ -997,9 +997,10 @@ class GenerationHandler:
             user_tier = token.user_paygate_tier or "PAYGATE_TIER_ONE"
 
             # TIER_TWO 账号需要使用 ultra 版本的模型
+            # 注意：Quality 模型（不含 _fast）不需要添加 ultra，Fast 模型才需要
             if user_tier == "PAYGATE_TIER_TWO":
-                # 如果模型 key 不包含 ultra，自动添加
-                if "ultra" not in model_key:
+                # 只有 Fast 模型才需要添加 ultra
+                if "fast" in model_key and "ultra" not in model_key:
                     # veo_3_1_i2v_s_fast_fl -> veo_3_1_i2v_s_fast_ultra_fl
                     # veo_3_1_i2v_s_fast_portrait_fl -> veo_3_1_i2v_s_fast_portrait_ultra_fl
                     # veo_3_1_t2v_fast -> veo_3_1_t2v_fast_ultra
@@ -1010,19 +1011,20 @@ class GenerationHandler:
                     else:
                         # 直接在末尾添加 _ultra
                         model_key = model_key + "_ultra"
-                    
+
                     if stream:
                         yield self._create_stream_chunk(f"TIER_TWO 账号自动切换到 ultra 模型: {model_key}\n")
                     debug_logger.log_info(f"[VIDEO] TIER_TWO 账号，模型自动调整: {model_config['model_key']} -> {model_key}")
 
             # TIER_ONE 账号需要使用非 ultra 版本
             elif user_tier == "PAYGATE_TIER_ONE":
-                # 如果模型 key 包含 ultra，需要移除（避免用户误用）
-                if "ultra" in model_key:
+                # 如果 Fast 模型包含 ultra，需要移除（避免用户误用）
+                # Quality 模型（不含 _fast）不需要移除，因为它们本身就没有 ultra 版本
+                if "fast" in model_key and "ultra" in model_key:
                     # veo_3_1_i2v_s_fast_ultra_fl -> veo_3_1_i2v_s_fast_fl
                     # veo_3_1_t2v_fast_ultra -> veo_3_1_t2v_fast
                     model_key = model_key.replace("_ultra_fl", "_fl").replace("_ultra", "")
-                    
+
                     if stream:
                         yield self._create_stream_chunk(f"TIER_ONE 账号自动切换到标准模型: {model_key}\n")
                     debug_logger.log_info(f"[VIDEO] TIER_ONE 账号，模型自动调整: {model_config['model_key']} -> {model_key}")
@@ -1121,13 +1123,27 @@ class GenerationHandler:
                         user_paygate_tier=token.user_paygate_tier or "PAYGATE_TIER_ONE"
                     )
                 else:
-                    # 只有首帧 - 需要去掉 model_key 中的 _fl
+                    # 只有首帧 - 需要移除 model_key 中的 _fl 后缀
+                    # 例如: veo_3_1_i2v_s_fast_fl -> veo_3_1_i2v_s_fast
+                    #       veo_3_1_i2v_s_fast_fl_ultra_relaxed -> veo_3_1_i2v_s_fast_ultra_relaxed
+                    #       veo_3_1_i2v_s_fast_portrait_fl -> veo_3_1_i2v_s_fast_portrait
+                    #       veo_3_1_i2v_s_fast_portrait_fl_ultra_relaxed -> veo_3_1_i2v_s_fast_portrait_ultra_relaxed
                     # 情况1: _fl_ 在中间 (如 veo_3_1_i2v_s_fast_fl_ultra_relaxed -> veo_3_1_i2v_s_fast_ultra_relaxed)
                     # 情况2: _fl 在结尾 (如 veo_3_1_i2v_s_fast_ultra_fl -> veo_3_1_i2v_s_fast_ultra)
-                    actual_model_key = model_config["model_key"].replace("_fl_", "_")
-                    if actual_model_key.endswith("_fl"):
-                        actual_model_key = actual_model_key[:-3]
-                    debug_logger.log_info(f"[I2V] 单帧模式，model_key: {model_config['model_key']} -> {actual_model_key}")
+
+                    # 转换逻辑：处理两种情况
+                    model_key_original = model_config["model_key"]
+                    if "_fl_" in model_key_original:
+                        # 中间的 _fl_，替换为 _
+                        actual_model_key = model_key_original.replace("_fl_", "_")
+                    elif model_key_original.endswith("_fl"):
+                        # 末尾的 _fl，直接移除
+                        actual_model_key = model_key_original[:-3]
+                    else:
+                        # 无需转换
+                        actual_model_key = model_key_original
+
+                    debug_logger.log_info(f"[I2V] 单帧模式，model_key: {model_key_original} -> {actual_model_key}")
                     result = await self.flow_client.generate_video_start_image(
                         at=token.at,
                         project_id=project_id,
@@ -1481,4 +1497,3 @@ class GenerationHandler:
         except Exception as e:
             # 日志记录失败不影响主流程
             debug_logger.log_error(f"Failed to log request: {e}")
-
