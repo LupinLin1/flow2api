@@ -6,6 +6,9 @@
 [![Python](https://img.shields.io/badge/python-3.8%2B-blue.svg)](https://www.python.org/)
 [![FastAPI](https://img.shields.io/badge/fastapi-0.119.0-green.svg)](https://fastapi.tiangolo.com/)
 [![Docker](https://img.shields.io/badge/docker-supported-blue.svg)](https://www.docker.com/)
+[![CI](https://github.com/LupinLin1/flow2api/actions/workflows/test.yml/badge.svg)](https://github.com/LupinLin1/flow2api/actions/workflows/test.yml)
+[![Docker Publish](https://github.com/LupinLin1/flow2api/actions/workflows/docker-publish.yml/badge.svg)](https://github.com/LupinLin1/flow2api/actions/workflows/docker-publish.yml)
+[![Docker Image](https://img.shields.io/badge/docker-ghcr.io-blue)](https://github.com/LupinLin1/flow2api/pkgs/container/flow2api)
 
 **一个功能完整的 OpenAI 兼容 API 服务，为 Flow 提供统一的接口**
 
@@ -37,7 +40,35 @@
 
 ### 方式一：Docker 部署（推荐）
 
-#### 标准模式（不使用代理）
+#### 使用预构建镜像（最快）
+
+直接从 GitHub Container Registry 拉取预构建的镜像：
+
+```bash
+# 拉取最新镜像
+docker pull ghcr.io/lupinlin1/flow2api:latest
+
+# 运行容器
+docker run -d \
+  --name flow2api \
+  -p 8000:8000 \
+  -v $(pwd)/data:/app/data \
+  ghcr.io/lupinlin1/flow2api:latest
+
+# 查看日志
+docker logs -f flow2api
+```
+
+**指定版本：**
+```bash
+# 拉取特定版本
+docker pull ghcr.io/lupinlin1/flow2api:v1.1.0
+
+# 运行特定版本
+docker run -d -p 8000:8000 ghcr.io/lupinlin1/flow2api:v1.1.0
+```
+
+#### 从源码构建
 
 ```bash
 # 克隆项目
@@ -82,6 +113,55 @@ pip install -r requirements.txt
 
 # 启动服务
 python main.py
+```
+
+### 方式三：VPS 环境部署
+
+如果你的 VPS 没有图形界面（如 Ubuntu Server、CentOS 等），需要安装 Xvfb（虚拟显示）来支持有头浏览器打码功能。
+
+#### 安装 Xvfb
+
+**Ubuntu/Debian:**
+```bash
+sudo apt-get update
+sudo apt-get install -y xvfb x11-utils
+```
+
+**CentOS/RHEL:**
+```bash
+sudo yum install -y xorg-x11-server-Xvfb
+```
+
+#### 使用 xvfb-run 启动
+
+安装 Xvfb 后，使用 xvfb-run 启动程序即可在有头浏览器模式下运行：
+
+```bash
+xvfb-run -a --server-args="-screen 0 1280x720x24" python main.py
+```
+
+参数说明：
+- `-a`: 自动选择可用的显示编号
+- `-screen 0 1280x720x24`: 创建 0 号屏幕，分辨率 1280x720，色深 24
+
+#### Docker 部署（已内置 Xvfb）
+
+更新后的 Dockerfile 已自动安装 Xvfb，无需额外配置：
+
+```bash
+# 重新构建镜像
+docker build -t flow2api:latest .
+
+# 运行容器
+docker run -p 8000:8000 flow2api:latest
+```
+
+#### 验证 Xvfb 环境
+
+测试 Xvfb 是否可用：
+
+```bash
+xvfb-run -a python -c "import os; print('DISPLAY:', os.environ.get('DISPLAY'))"
 ```
 
 ### 首次访问
@@ -272,4 +352,4 @@ curl -X POST "http://localhost:8000/v1/chat/completions" \
 
 ## Star History
 
-[![Star History Chart](https://api.star-history.com/svg?repos=TheSmallHanCat/flow2api&type=date&legend=top-left)](https://www.star-history.com/#TheSmallHanCat/flow2api&type=date&legend=top-left)
+[![Star History Chart](https://api.star-history.com/svg?repos=LupinLin1/flow2api&type=date&legend=top-left)](https://www.star-history.com/#LupinLin1/flow2api&type=date&legend=top-left)

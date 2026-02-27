@@ -600,7 +600,7 @@ async def get_system_info(token: str = Depends(verify_admin_token)):
             "total_tokens": len(tokens),
             "active_tokens": len(active_tokens),
             "total_credits": total_credits,
-            "version": "1.0.0"
+            "version": "1.1.0"
         }
     }
 

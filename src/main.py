@@ -180,7 +180,7 @@ admin.set_dependencies(token_manager, proxy_manager, db)
 app = FastAPI(
     title="Flow2API",
     description="OpenAI-compatible API for Google VideoFX (Veo)",
-    version="1.0.0",
+    version="1.1.0",
     lifespan=lifespan
 )
 

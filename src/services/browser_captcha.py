@@ -20,27 +20,28 @@ from urllib.parse import urlparse, unquote
 from ..core.logger import debug_logger
 
 
-# ==================== Docker 环境检测 ====================
-def _is_running_in_docker() -> bool:
-    """检测是否在 Docker 容器中运行"""
-    # 方法1: 检查 /.dockerenv 文件
-    if os.path.exists('/.dockerenv'):
-        return True
-    # 方法2: 检查 cgroup
+# ==================== 显示环境检测 ====================
+def _has_display_environment() -> bool:
+    """检测是否有可用的显示环境（支持 Xvfb 虚拟显示）"""
+    # 检查 DISPLAY 环境变量
+    display = os.environ.get('DISPLAY')
+    if not display:
+        return False
+
+    # 检查 xvfb-run 是否可用（可选验证，用于检测 Xvfb 环境）
     try:
-        with open('/proc/1/cgroup', 'r') as f:
-            content = f.read()
-            if 'docker' in content or 'kubepods' in content or 'containerd' in content:
-                return True
+        result = subprocess.run(['which', 'xvfb-run'], capture_output=True, timeout=2)
+        if result.returncode == 0:
+            # xvfb-run 可用，说明在 Xvfb 环境中
+            return True
     except:
         pass
-    # 方法3: 检查环境变量
-    if os.environ.get('DOCKER_CONTAINER') or os.environ.get('KUBERNETES_SERVICE_HOST'):
-        return True
-    return False
+
+    # 有 DISPLAY 环境变量即认为有显示环境
+    return True
 
 
-IS_DOCKER = _is_running_in_docker()
+CAN_USE_HEADLESS_BROWSER = _has_display_environment()
 
 
 # ==================== playwright 自动安装 ====================
@@ -155,10 +156,10 @@ Route = None
 BrowserContext = None
 PLAYWRIGHT_AVAILABLE = False
 
-if IS_DOCKER:
-    debug_logger.log_warning("[BrowserCaptcha] 检测到 Docker 环境，有头浏览器打码不可用，请使用第三方打码服务")
-    print("[BrowserCaptcha] ⚠️ 检测到 Docker 环境，有头浏览器打码不可用")
-    print("[BrowserCaptcha] 请使用第三方打码服务: yescaptcha, capmonster, ezcaptcha, capsolver")
+if not CAN_USE_HEADLESS_BROWSER:
+    debug_logger.log_warning("[BrowserCaptcha] 未检测到显示环境，有头浏览器打码不可用，请使用第三方打码服务")
+    print("[BrowserCaptcha] ⚠️ 未检测到显示环境，有头浏览器打码不可用")
+    print("[BrowserCaptcha] 请安装 Xvfb 并使用 xvfb-run 启动程序，或使用第三方打码服务: yescaptcha, capmonster, ezcaptcha, capsolver")
 else:
     if _ensure_playwright_installed():
         try:
@@ -558,10 +559,10 @@ class BrowserCaptchaService:
     
     def _check_available(self):
         """检查服务是否可用"""
-        if IS_DOCKER:
+        if not CAN_USE_HEADLESS_BROWSER:
             raise RuntimeError(
-                "有头浏览器打码在 Docker 环境中不可用。"
-                "请使用第三方打码服务: yescaptcha, capmonster, ezcaptcha, capsolver"
+                "有头浏览器打码在当前环境中不可用（缺少显示环境）。"
+                "请安装 Xvfb 并使用 xvfb-run 启动程序，或使用第三方打码服务: yescaptcha, capmonster, ezcaptcha, capsolver"
             )
         if not PLAYWRIGHT_AVAILABLE or async_playwright is None:
             raise RuntimeError(

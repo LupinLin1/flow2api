@@ -1,0 +1,42 @@
+version: '3.8'
+
+services:
+  flow2api:
+    # 使用 GitHub Container Registry 的预构建镜像
+    image: ghcr.io/lupinlin1/flow2api:latest
+    container_name: flow2api
+    restart: unless-stopped
+
+    ports:
+      - "8000:8000"
+
+    environment:
+      - TZ=Asia/Shanghai
+
+    volumes:
+      # 持久化数据存储
+      - ./data:/app/data
+      # 数据库文件
+      - ./flow2api.db:/app/flow2api.db
+
+    # 健康检查
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8000/docs"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 40s
+
+    # 资源限制（可选）
+    deploy:
+      resources:
+        limits:
+          cpus: '2'
+          memory: 2G
+        reservations:
+          cpus: '0.5'
+          memory: 512M
+
+volumes:
+  data:
+  flow2api.db:
