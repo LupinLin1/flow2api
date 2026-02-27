@@ -101,6 +101,8 @@ python main.py
 | `gemini-2.5-flash-image-portrait` | 图/文生图 | 竖屏 |
 | `gemini-3.0-pro-image-landscape` | 图/文生图 | 横屏 |
 | `gemini-3.0-pro-image-portrait` | 图/文生图 | 竖屏 |
+| `gemini-3.1-flash-image-landscape` | 图/文生图 | 横屏 |
+| `gemini-3.1-flash-image-portrait` | 图/文生图 | 竖屏 |
 | `imagen-4.0-generate-preview-landscape` | 图/文生图 | 横屏 |
 | `imagen-4.0-generate-preview-portrait` | 图/文生图 | 竖屏 |
 
