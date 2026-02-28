@@ -1290,7 +1290,7 @@ class FlowClient:
                             debug_logger.log_info(f"[reCAPTCHA {method}] Token获取成功")
                             return response
 
-                    time.sleep(3)
+                    await asyncio.sleep(3)
 
                 debug_logger.log_error(f"[reCAPTCHA {method}] Timeout waiting for token")
                 return None

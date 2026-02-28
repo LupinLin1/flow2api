@@ -27,8 +27,10 @@ def _has_display_environment() -> bool:
         if result.returncode == 0:
             # xvfb-run 可用，说明在 Xvfb 环境中
             return True
-    except:
-        pass
+    except (subprocess.TimeoutExpired, FileNotFoundError) as e:
+        debug_logger.log_debug(f"[BrowserCaptcha] 检测 xvfb-run 失败: {type(e).__name__}")
+    except Exception as e:
+        debug_logger.log_debug(f"[BrowserCaptcha] 检测 xvfb-run 异常: {type(e).__name__}")
 
     # 有 DISPLAY 环境变量即认为有显示环境
     return True
@@ -305,8 +307,8 @@ class BrowserCaptchaService:
                     if resident_info and resident_info.tab:
                         try:
                             await resident_info.tab.close()
-                        except Exception:
-                            pass
+                        except Exception as e:
+                            debug_logger.log_warning(f"[BrowserCaptcha] 关闭标签页失败: {type(e).__name__}")
                 debug_logger.log_info(f"[BrowserCaptcha] 已关闭所有常驻标签页 (共 {len(project_ids)} 个)")
         
         # 向后兼容：清理旧属性
@@ -317,8 +319,8 @@ class BrowserCaptchaService:
         if self.resident_tab:
             try:
                 await self.resident_tab.close()
-            except Exception:
-                pass
+            except Exception as e:
+                debug_logger.log_warning(f"[BrowserCaptcha] 关闭常驻标签页失败: {type(e).__name__}")
             self.resident_tab = None
         
         self.resident_project_id = None
@@ -348,7 +350,7 @@ class BrowserCaptchaService:
             (() => {{
                 if (document.querySelector('script[src*="recaptcha"]')) return;
                 const script = document.createElement('script');
-                script.src = 'https://www.google.com/recaptcha/api.js?render={self.website_key}';
+                script.src = 'https://www.google.com/recaptcha/enterprise.js?render={self.website_key}';
                 script.async = true;
                 document.head.appendChild(script);
             }})()
@@ -425,8 +427,8 @@ class BrowserCaptchaService:
         # 清理临时变量
         try:
             await tab.evaluate(f"delete window.{token_var}; delete window.{error_var};")
-        except:
-            pass
+        except Exception as e:
+            debug_logger.log_debug(f"[BrowserCaptcha] 清理临时变量失败: {type(e).__name__}")
         
         return token
 
@@ -533,8 +535,8 @@ class BrowserCaptchaService:
                 debug_logger.log_error(f"[BrowserCaptcha] 页面加载超时 (project: {project_id})")
                 try:
                     await tab.close()
-                except:
-                    pass
+                except Exception as e:
+                    debug_logger.log_warning(f"[BrowserCaptcha] 关闭超时的标签页失败: {type(e).__name__}")
                 return None
             
             # 等待 reCAPTCHA 加载
@@ -544,8 +546,8 @@ class BrowserCaptchaService:
                 debug_logger.log_error(f"[BrowserCaptcha] reCAPTCHA 加载失败 (project: {project_id})")
                 try:
                     await tab.close()
-                except:
-                    pass
+                except Exception as e:
+                    debug_logger.log_warning(f"[BrowserCaptcha] 关闭失败的标签页失败: {type(e).__name__}")
                 return None
             
             # 创建常驻信息对象
@@ -636,8 +638,8 @@ class BrowserCaptchaService:
             if tab:
                 try:
                     await tab.close()
-                except Exception:
-                    pass
+                except Exception as e:
+                    debug_logger.log_warning(f"[BrowserCaptcha] 关闭标签页失败: {type(e).__name__}")
 
     async def close(self):
         """关闭浏览器"""
