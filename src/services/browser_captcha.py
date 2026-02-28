@@ -22,23 +22,35 @@ from ..core.logger import debug_logger
 
 # ==================== 显示环境检测 ====================
 def _has_display_environment() -> bool:
-    """检测是否有可用的显示环境（支持 Xvfb 虚拟显示）"""
-    # 检查 DISPLAY 环境变量
+    """检测是否有可用的显示环境（支持 Xvfb 虚拟显示和 macOS）"""
+    import platform
+
+    # 检查 macOS 平台（macOS 有自己的图形系统，不需要 DISPLAY）
+    if platform.system() == 'Darwin':
+        try:
+            result = subprocess.run(['pgrep', '-x', 'WindowServer'], capture_output=True, timeout=2)
+            if result.returncode == 0:
+                # macOS 上 WindowServer 正在运行，说明有图形界面
+                debug_logger.log_info("[BrowserCaptcha] 检测到 macOS 图形环境")
+                return True
+        except:
+            pass
+
+    # 检查 DISPLAY 环境变量（Linux X11）
     display = os.environ.get('DISPLAY')
-    if not display:
-        return False
+    if display:
+        return True
 
     # 检查 xvfb-run 是否可用（可选验证，用于检测 Xvfb 环境）
     try:
         result = subprocess.run(['which', 'xvfb-run'], capture_output=True, timeout=2)
         if result.returncode == 0:
-            # xvfb-run 可用，说明在 Xvfb 环境中
+            debug_logger.log_info("[BrowserCaptcha] 检测到 Xvfb 环境")
             return True
     except:
         pass
 
-    # 有 DISPLAY 环境变量即认为有显示环境
-    return True
+    return False
 
 
 CAN_USE_HEADLESS_BROWSER = _has_display_environment()
@@ -861,6 +873,82 @@ class BrowserCaptchaService:
             browser = self._browsers.pop(browser_id, None)
             if browser:
                 await browser.close()
+
+    async def refresh_session_token(self, project_id: str) -> Optional[str]:
+        """刷新 Session Token（Browser 模式）
+
+        使用 Playwright 浏览器访问 Flow AI 页面，从 cookies 中提取
+        __Secure-next-auth.session-token
+
+        Args:
+            project_id: 项目 ID
+
+        Returns:
+            新的 Session Token，失败返回 None
+        """
+        import playwright.async_api as playwright_api
+
+        start_time = time.time()
+        debug_logger.log_info(f"[BrowserCaptcha] 开始刷新 Session Token (project: {project_id})...")
+
+        self._check_available()
+
+        # 使用第一个浏览器实例
+        browser_id = 0
+        browser = await self._get_or_create_browser(browser_id)
+
+        try:
+            # 获取或创建浏览器上下文
+            context = await browser._get_or_create_context()
+
+            # 创建新页面
+            page = await context.new_page()
+            page_url = f"https://labs.google/fx/tools/flow/project/{project_id}"
+
+            try:
+                # 导航到 Flow AI 页面
+                debug_logger.log_info(f"[BrowserCaptcha] 导航到 {page_url}...")
+                await page.goto(page_url, wait_until="load", timeout=30000)
+
+                # 等待页面加载完成
+                await page.wait_for_load_state("networkidle", timeout=10000)
+
+                # 额外等待确保 cookies 已设置
+                await asyncio.sleep(2)
+
+                # 从 cookies 中提取 __Secure-next-auth.session-token
+                session_token = None
+
+                # 使用 Playwright 的 cookies API
+                cookies = await context.cookies()
+                for cookie in cookies:
+                    if cookie.get("name") == "__Secure-next-auth.session-token":
+                        session_token = cookie.get("value")
+                        debug_logger.log_info(f"[BrowserCaptcha] 找到 Session Token (长度: {len(session_token) if session_token else 0})")
+                        break
+
+                duration_ms = (time.time() - start_time) * 1000
+
+                if session_token:
+                    debug_logger.log_info(f"[BrowserCaptcha] ✅ Session Token 获取成功（耗时 {duration_ms:.0f}ms）")
+                    return session_token
+                else:
+                    debug_logger.log_error(f"[BrowserCaptcha] ❌ 未找到 __Secure-next-auth.session-token cookie")
+                    return None
+
+            except Exception as e:
+                debug_logger.log_error(f"[BrowserCaptcha] 刷新 Session Token 失败: {type(e).__name__}: {str(e)[:200]}")
+                return None
+            finally:
+                # 关闭页面
+                try:
+                    await page.close()
+                except Exception:
+                    pass
+
+        except Exception as e:
+            debug_logger.log_error(f"[BrowserCaptcha] 刷新 Session Token 异常: {type(e).__name__}: {str(e)[:200]}")
+            return None
 
     async def close(self):
         """关闭所有浏览器实例并清理资源"""

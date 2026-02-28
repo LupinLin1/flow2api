@@ -15,25 +15,37 @@ from ..core.logger import debug_logger
 
 # ==================== 显示环境检测 ====================
 def _has_display_environment() -> bool:
-    """检测是否有可用的显示环境（支持 Xvfb 虚拟显示）"""
-    # 检查 DISPLAY 环境变量
+    """检测是否有可用的显示环境（支持 Xvfb 虚拟显示和 macOS）"""
+    import platform
+
+    # 检查 macOS 平台（macOS 有自己的图形系统，不需要 DISPLAY）
+    if platform.system() == 'Darwin':
+        try:
+            result = subprocess.run(['pgrep', '-x', 'WindowServer'], capture_output=True, timeout=2)
+            if result.returncode == 0:
+                # macOS 上 WindowServer 正在运行，说明有图形界面
+                debug_logger.log_info("[BrowserCaptcha] 检测到 macOS 图形环境 (WindowServer 运行中)")
+                return True
+        except:
+            pass
+
+    # 检查 DISPLAY 环境变量（Linux X11）
     display = os.environ.get('DISPLAY')
-    if not display:
-        return False
+    if display:
+        return True
 
     # 检查 xvfb-run 是否可用（可选验证，用于检测 Xvfb 环境）
     try:
         result = subprocess.run(['which', 'xvfb-run'], capture_output=True, timeout=2)
         if result.returncode == 0:
-            # xvfb-run 可用，说明在 Xvfb 环境中
+            debug_logger.log_info("[BrowserCaptcha] 检测到 Xvfb 环境")
             return True
     except (subprocess.TimeoutExpired, FileNotFoundError) as e:
         debug_logger.log_debug(f"[BrowserCaptcha] 检测 xvfb-run 失败: {type(e).__name__}")
     except Exception as e:
         debug_logger.log_debug(f"[BrowserCaptcha] 检测 xvfb-run 异常: {type(e).__name__}")
 
-    # 有 DISPLAY 环境变量即认为有显示环境
-    return True
+    return False
 
 
 CAN_USE_HEADLESS_BROWSER = _has_display_environment()
@@ -185,7 +197,7 @@ class BrowserCaptchaService:
         """初始化 nodriver 浏览器"""
         # 检查服务是否可用
         self._check_available()
-        
+
         if self._initialized and self.browser:
             # 检查浏览器是否仍然存活
             try:
@@ -205,19 +217,31 @@ class BrowserCaptchaService:
             # 确保 user_data_dir 存在
             os.makedirs(self.user_data_dir, exist_ok=True)
 
+            # macOS 特殊处理：在有 GUI 的环境下使用有头模式
+            import platform
+            browser_args = [
+                '--no-sandbox',
+                '--disable-dev-shm-usage',
+                '--disable-setuid-sandbox',
+                '--disable-gpu',
+                '--window-size=1280,720',
+                '--profile-directory=Default',  # 跳过 Profile 选择器页面
+            ]
+
+            # 在 macOS 上添加额外参数以确保兼容性
+            if platform.system() == 'Darwin':
+                browser_args.extend([
+                    '--disable-software-rasterizer',
+                    '--disable-extensions',
+                ])
+                debug_logger.log_info("[BrowserCaptcha] macOS 平台：使用有头浏览器模式")
+
             # 启动 nodriver 浏览器
             self.browser = await uc.start(
                 headless=self.headless,
                 user_data_dir=self.user_data_dir,
                 sandbox=False,  # nodriver 需要此参数来禁用 sandbox
-                browser_args=[
-                    '--no-sandbox',
-                    '--disable-dev-shm-usage',
-                    '--disable-setuid-sandbox',
-                    '--disable-gpu',
-                    '--window-size=1280,720',
-                    '--profile-directory=Default',  # 跳过 Profile 选择器页面
-                ]
+                browser_args=browser_args
             )
 
             self._initialized = True

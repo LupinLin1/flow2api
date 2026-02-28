@@ -379,21 +379,24 @@ class TokenManager:
         try:
             from ..core.config import config
 
-            # 仅在 personal 模式下支持 ST 自动刷新
-            if config.captcha_method != "personal":
-                debug_logger.log_info(f"[ST_REFRESH] 非 personal 模式，跳过 ST 自动刷新")
-                return None
-
             if not token.current_project_id:
                 debug_logger.log_warning(f"[ST_REFRESH] Token {token_id} 没有 project_id，无法刷新 ST")
                 return None
 
-            debug_logger.log_info(f"[ST_REFRESH] Token {token_id}: 尝试通过浏览器刷新 ST...")
+            debug_logger.log_info(f"[ST_REFRESH] Token {token_id}: 尝试通过浏览器刷新 ST (模式: {config.captcha_method})...")
 
-            from .browser_captcha_personal import BrowserCaptchaService
-            service = await BrowserCaptchaService.get_instance(self.db)
+            # 根据模式选择不同的刷新方法
+            if config.captcha_method == "personal":
+                # Personal 模式：使用 nodriver 常驻 tab
+                from .browser_captcha_personal import BrowserCaptchaService
+                service = await BrowserCaptchaService.get_instance(self.db)
+                new_st = await service.refresh_session_token(token.current_project_id)
+            else:
+                # Browser 模式：使用 Playwright
+                from .browser_captcha import BrowserCaptchaService
+                service = await BrowserCaptchaService.get_instance(self.db)
+                new_st = await service.refresh_session_token(token.current_project_id)
 
-            new_st = await service.refresh_session_token(token.current_project_id)
             if new_st and new_st != token.st:
                 # 更新数据库中的 ST
                 await self.db.update_token(token_id, st=new_st)
