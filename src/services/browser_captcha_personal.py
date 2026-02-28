@@ -348,7 +348,7 @@ class BrowserCaptchaService:
             (() => {{
                 if (document.querySelector('script[src*="recaptcha"]')) return;
                 const script = document.createElement('script');
-                script.src = 'https://www.google.com/recaptcha/api.js?render={self.website_key}';
+                script.src = 'https://www.google.com/recaptcha/enterprise.js?render={self.website_key}';
                 script.async = true;
                 document.head.appendChild(script);
             }})()

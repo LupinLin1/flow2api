@@ -199,9 +199,9 @@ def validate_browser_proxy_url(proxy_url: str) -> tuple[bool, str]:
     return True, None
 
 class TokenBrowser:
-    """简化版浏览器：每次获取 token 时启动新浏览器，用完即关
-    
-    每次都是新的随机 UA，避免长时间运行导致的各种问题
+    """持久化浏览器：复用浏览器进程和上下文，保持 cookie 连续性
+
+    浏览器进程常驻，context 每 N 次请求后轮换（获得新 UA/指纹）
     """
     
     # UA 池
@@ -352,21 +352,15 @@ class TokenBrowser:
         self._semaphore = asyncio.Semaphore(1)  # 同时只能有一个任务
         self._solve_count = 0
         self._error_count = 0
-    
-    async def _create_browser(self) -> tuple:
-        """创建新浏览器实例（新 UA），返回 (playwright, browser, context)"""
-        import random
-        
-        random_ua = random.choice(self.UA_LIST)
-        base_w, base_h = random.choice(self.RESOLUTIONS)
-        width, height = base_w, base_h - random.randint(0, 80)
-        viewport = {"width": width, "height": height}
-        
-        playwright = await async_playwright().start()
-        Path(self.user_data_dir).mkdir(parents=True, exist_ok=True)
-        
-        # 代理配置
-        proxy_option = None
+        # 持久化浏览器状态
+        self._playwright = None
+        self._browser = None
+        self._context = None
+        self._request_count = 0
+        self._max_requests_per_context = 50  # 每 50 次请求轮换 context
+
+    async def _get_proxy_option(self) -> Optional[Dict[str, str]]:
+        """获取代理配置"""
         try:
             if self.db:
                 captcha_config = await self.db.get_captcha_config()
@@ -375,53 +369,137 @@ class TokenBrowser:
                     proxy_option = parse_proxy_url(raw_url.strip())
                     if proxy_option:
                         debug_logger.log_info(f"[BrowserCaptcha] Token-{self.token_id} 使用代理: {proxy_option['server']}")
-        except: pass
-        
-        try:
-            browser = await playwright.chromium.launch(
-                headless=False,
-                proxy=proxy_option,
-                args=[
-                    '--disable-blink-features=AutomationControlled',
-                    '--no-sandbox',
-                    '--disable-dev-shm-usage',
-                    '--disable-setuid-sandbox',
-                    '--no-first-run',
-                    '--no-zygote',
-                    f'--window-size={width},{height}',
-                    '--disable-infobars',
-                    '--hide-scrollbars',
-                ]
-            )
-            context = await browser.new_context(
-                user_agent=random_ua,
-                viewport=viewport,
-            )
-            return playwright, browser, context
-        except Exception as e:
-            debug_logger.log_error(f"[BrowserCaptcha] Token-{self.token_id} 启动浏览器失败: {type(e).__name__}: {str(e)[:200]}")
-            # 确保清理已创建的对象
+                        return proxy_option
+        except:
+            pass
+        return None
+
+    async def _ensure_browser(self):
+        """确保浏览器进程已启动（惰性初始化）"""
+        if self._browser and self._playwright:
+            return
+        # 清理旧的残留
+        await self._close_browser_only()
+
+        self._playwright = await async_playwright().start()
+        Path(self.user_data_dir).mkdir(parents=True, exist_ok=True)
+
+        proxy_option = await self._get_proxy_option()
+        base_w, base_h = random.choice(self.RESOLUTIONS)
+        width, height = base_w, base_h - random.randint(0, 80)
+
+        self._browser = await self._playwright.chromium.launch(
+            headless=False,
+            proxy=proxy_option,
+            args=[
+                '--disable-blink-features=AutomationControlled',
+                '--no-sandbox',
+                '--disable-dev-shm-usage',
+                '--disable-setuid-sandbox',
+                '--no-first-run',
+                '--no-zygote',
+                f'--window-size={width},{height}',
+                '--disable-infobars',
+                '--hide-scrollbars',
+            ]
+        )
+        debug_logger.log_info(f"[BrowserCaptcha] Token-{self.token_id} 浏览器进程已启动")
+
+    async def _get_or_create_context(self):
+        """获取或创建浏览器上下文，到期后轮换"""
+        await self._ensure_browser()
+
+        # 检查是否需要轮换 context
+        if self._context and self._request_count < self._max_requests_per_context:
+            self._request_count += 1
+            return self._context
+
+        # 关闭旧 context
+        if self._context:
             try:
-                if playwright:
-                    await playwright.stop()
-            except: pass
-            raise
+                await self._context.close()
+            except:
+                pass
+            debug_logger.log_info(f"[BrowserCaptcha] Token-{self.token_id} 轮换 context（已用 {self._request_count} 次）")
+
+        random_ua = random.choice(self.UA_LIST)
+        base_w, base_h = random.choice(self.RESOLUTIONS)
+        width, height = base_w, base_h - random.randint(0, 80)
+        viewport = {"width": width, "height": height}
+
+        self._context = await self._browser.new_context(
+            user_agent=random_ua,
+            viewport=viewport,
+        )
+        self._request_count = 1
+        return self._context
+
+    async def _close_browser_only(self):
+        """关闭浏览器进程（不关闭 context，供内部使用）"""
+        try:
+            if self._context:
+                await self._context.close()
+        except:
+            pass
+        self._context = None
+        try:
+            if self._browser:
+                await self._browser.close()
+        except:
+            pass
+        self._browser = None
+        try:
+            if self._playwright:
+                await self._playwright.stop()
+        except:
+            pass
+        self._playwright = None
+        self._request_count = 0
+
+    async def close(self):
+        """公开的关闭方法"""
+        await self._close_browser_only()
     
-    async def _close_browser(self, playwright, browser, context):
-        """关闭浏览器实例"""
+    async def _simulate_human_behavior(self, page):
+        """模拟人类浏览行为，提升 reCAPTCHA v3 评分"""
         try:
-            if context:
-                await context.close()
-        except: pass
-        try:
-            if browser:
-                await browser.close()
-        except: pass
-        try:
-            if playwright:
-                await playwright.stop()
-        except: pass
-    
+            viewport = page.viewport_size or {"width": 1920, "height": 1080}
+            w, h = viewport["width"], viewport["height"]
+
+            # 初始延迟 - 模拟用户看到页面后的反应时间
+            await asyncio.sleep(random.uniform(0.5, 1.5))
+
+            # 随机鼠标移动 2-4 次
+            for _ in range(random.randint(2, 4)):
+                x = random.randint(100, w - 100)
+                y = random.randint(100, h - 100)
+                await page.mouse.move(x, y, steps=random.randint(3, 8))
+                await asyncio.sleep(random.uniform(0.1, 0.4))
+
+            # 随机滚动
+            await page.mouse.wheel(0, random.randint(50, 200))
+            await asyncio.sleep(random.uniform(0.2, 0.5))
+
+            # 尝试点击 textarea（模拟用户准备输入）
+            try:
+                textarea = page.locator("textarea").first
+                if await textarea.is_visible(timeout=500):
+                    await textarea.click()
+                    await asyncio.sleep(random.uniform(0.2, 0.5))
+            except Exception:
+                pass
+
+            # 最后再移一下鼠标
+            await page.mouse.move(
+                random.randint(200, w - 200),
+                random.randint(200, h - 200),
+                steps=random.randint(3, 6)
+            )
+            await asyncio.sleep(random.uniform(0.3, 0.8))
+        except Exception:
+            # 行为模拟失败不影响主流程
+            pass
+
     async def _execute_captcha(self, context, project_id: str, website_key: str, action: str) -> Optional[str]:
         """在给定 context 中执行打码逻辑"""
         page = None
@@ -433,7 +511,63 @@ class TokenBrowser:
             
             async def handle_route(route):
                 if route.request.url.rstrip('/') == page_url.rstrip('/'):
-                    html = f"""<html><head><script src="https://www.google.com/recaptcha/enterprise.js?render={website_key}"></script></head><body></body></html>"""
+                    html = f"""<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>Flow - Google Labs</title>
+    <meta name="description" content="Create videos and images with AI using Flow on Google Labs">
+    <link rel="icon" href="https://labs.google/favicon.ico">
+    <script src="https://www.google.com/recaptcha/enterprise.js?render={website_key}"></script>
+    <style>
+        * {{ margin: 0; padding: 0; box-sizing: border-box; }}
+        body {{ font-family: 'Google Sans', Roboto, Arial, sans-serif; background: #131314; color: #e3e3e3; min-height: 100vh; }}
+        header {{ display: flex; align-items: center; padding: 12px 24px; border-bottom: 1px solid #3c4043; }}
+        header .logo {{ font-size: 18px; font-weight: 500; color: #8ab4f8; }}
+        header nav {{ margin-left: auto; display: flex; gap: 16px; }}
+        header nav a {{ color: #9aa0a6; text-decoration: none; font-size: 14px; }}
+        .main {{ max-width: 960px; margin: 40px auto; padding: 0 24px; }}
+        .project-title {{ font-size: 28px; font-weight: 400; margin-bottom: 24px; }}
+        .prompt-area {{ background: #1e1f20; border-radius: 12px; padding: 20px; margin-bottom: 24px; }}
+        .prompt-input {{ width: 100%; background: transparent; border: none; color: #e3e3e3; font-size: 16px; outline: none; resize: none; min-height: 60px; font-family: inherit; }}
+        .prompt-input::placeholder {{ color: #5f6368; }}
+        .toolbar {{ display: flex; align-items: center; gap: 12px; margin-top: 16px; }}
+        .btn {{ padding: 8px 24px; border-radius: 20px; border: none; font-size: 14px; cursor: pointer; font-family: inherit; }}
+        .btn-primary {{ background: #8ab4f8; color: #202124; }}
+        .btn-secondary {{ background: #3c4043; color: #e3e3e3; }}
+        .gallery {{ display: grid; grid-template-columns: repeat(2, 1fr); gap: 16px; }}
+        .gallery-item {{ background: #1e1f20; border-radius: 8px; aspect-ratio: 16/9; }}
+        .footer {{ text-align: center; color: #5f6368; font-size: 12px; padding: 24px; margin-top: 40px; }}
+    </style>
+</head>
+<body>
+    <header>
+        <div class="logo">Flow</div>
+        <nav>
+            <a href="#">My projects</a>
+            <a href="#">Gallery</a>
+        </nav>
+    </header>
+    <div class="main">
+        <h1 class="project-title">My Project</h1>
+        <div class="prompt-area">
+            <textarea class="prompt-input" placeholder="Describe what you want to create..." rows="3"></textarea>
+            <div class="toolbar">
+                <button class="btn btn-primary">Generate</button>
+                <button class="btn btn-secondary">Settings</button>
+            </div>
+        </div>
+        <div class="gallery">
+            <div class="gallery-item"></div>
+            <div class="gallery-item"></div>
+            <div class="gallery-item"></div>
+            <div class="gallery-item"></div>
+        </div>
+    </div>
+    <div class="footer">Google Labs &middot; Experiment responsibly</div>
+</body>
+</html>"""
                     await route.fulfill(status=200, content_type="text/html", body=html)
                 elif any(d in route.request.url for d in ["google.com", "gstatic.com", "recaptcha.net"]):
                     await route.continue_()
@@ -452,7 +586,10 @@ class TokenBrowser:
             except Exception as e:
                 debug_logger.log_warning(f"[BrowserCaptcha] Token-{self.token_id} grecaptcha 未就绪: {type(e).__name__}: {str(e)[:200]}")
                 return None
-            
+
+            # 模拟人类行为，提升 reCAPTCHA v3 评分
+            await self._simulate_human_behavior(page)
+
             token = await asyncio.wait_for(
                 page.evaluate(f"""
                     (actionName) => {{
@@ -477,42 +614,37 @@ class TokenBrowser:
                 except: pass
     
     async def get_token(self, project_id: str, website_key: str, action: str = "IMAGE_GENERATION") -> Optional[str]:
-        """获取 Token：启动新浏览器 -> 打码 -> 关闭浏览器"""
+        """获取 Token：复用持久化浏览器上下文"""
         async with self._semaphore:
             MAX_RETRIES = 3
-            
+
             for attempt in range(MAX_RETRIES):
-                playwright = None
-                browser = None
-                context = None
                 try:
                     start_ts = time.time()
-                    
-                    # 每次都启动新浏览器（新 UA）
-                    playwright, browser, context = await self._create_browser()
-                    
+
+                    context = await self._get_or_create_context()
+
                     # 执行打码
                     token = await self._execute_captcha(context, project_id, website_key, action)
-                    
+
                     if token:
                         self._solve_count += 1
                         debug_logger.log_info(f"[BrowserCaptcha] Token-{self.token_id} 获取成功 ({(time.time()-start_ts)*1000:.0f}ms)")
                         return token
-                    
+
                     self._error_count += 1
                     debug_logger.log_warning(f"[BrowserCaptcha] Token-{self.token_id} 尝试 {attempt+1}/{MAX_RETRIES} 失败")
-                    
+
                 except Exception as e:
                     self._error_count += 1
                     debug_logger.log_error(f"[BrowserCaptcha] Token-{self.token_id} 浏览器错误: {type(e).__name__}: {str(e)[:200]}")
-                finally:
-                    # 无论成功失败都关闭浏览器
-                    await self._close_browser(playwright, browser, context)
-                
+                    # 浏览器异常时强制重建
+                    await self._close_browser_only()
+
                 # 重试前等待
                 if attempt < MAX_RETRIES - 1:
                     await asyncio.sleep(1)
-            
+
             return None
     
 
@@ -685,11 +817,14 @@ class BrowserCaptchaService:
 
     async def remove_browser(self, browser_id: int):
         async with self._browsers_lock:
-            if browser_id in self._browsers:
-                self._browsers.pop(browser_id)
+            browser = self._browsers.pop(browser_id, None)
+            if browser:
+                await browser.close()
 
     async def close(self):
         async with self._browsers_lock:
+            for browser in self._browsers.values():
+                await browser.close()
             self._browsers.clear()
             
     async def open_login_browser(self): return {"success": False, "error": "Not implemented"}
