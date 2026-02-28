@@ -201,7 +201,19 @@ def validate_browser_proxy_url(proxy_url: str) -> tuple[bool, str]:
 class TokenBrowser:
     """持久化浏览器：复用浏览器进程和上下文，保持 cookie 连续性
 
-    浏览器进程常驻，context 每 N 次请求后轮换（获得新 UA/指纹）
+    架构说明：
+        - 浏览器进程常驻，避免重复启动开销
+        - BrowserContext 每 50 次请求后轮换，获得新 UA/指纹
+        - 惰性初始化：首次调用 get_token() 时才启动浏览器
+        - 异常时自动重建浏览器进程
+
+    与临时浏览器架构的区别：
+        - 旧架构：每次获取 token 都启动新浏览器（慢）
+        - 新架构：复用浏览器进程，仅在必要时轮换 context（快）
+
+    线程安全：
+        - 并发控制由服务层的 semaphore 管理
+        - 多个 TokenBrowser 实例之间独立运行
     """
     
     # UA 池
@@ -349,7 +361,8 @@ class TokenBrowser:
         self.token_id = token_id
         self.user_data_dir = user_data_dir
         self.db = db
-        self._semaphore = asyncio.Semaphore(1)  # 同时只能有一个任务
+        # 注意：移除了 self._semaphore，避免与 BrowserCaptchaService._token_semaphore 形成双重锁定
+        # 并发控制由服务层统一管理
         self._solve_count = 0
         self._error_count = 0
         # 持久化浏览器状态
@@ -364,14 +377,16 @@ class TokenBrowser:
         try:
             if self.db:
                 captcha_config = await self.db.get_captcha_config()
-                raw_url = captcha_config.browser_proxy_enabled and captcha_config.browser_proxy_url
-                if raw_url:
-                    proxy_option = parse_proxy_url(raw_url.strip())
-                    if proxy_option:
-                        debug_logger.log_info(f"[BrowserCaptcha] Token-{self.token_id} 使用代理: {proxy_option['server']}")
-                        return proxy_option
-        except:
-            pass
+                if captcha_config:  # 检查 None
+                    raw_url = (captcha_config.browser_proxy_enabled and
+                              captcha_config.browser_proxy_url)
+                    if raw_url:
+                        proxy_option = parse_proxy_url(raw_url.strip())
+                        if proxy_option:
+                            debug_logger.log_info(f"[BrowserCaptcha] Token-{self.token_id} 使用代理: {proxy_option['server']}")
+                            return proxy_option
+        except Exception as e:
+            debug_logger.log_warning(f"[BrowserCaptcha] Token-{self.token_id} 获取代理配置失败: {type(e).__name__}: {str(e)[:100]}")
         return None
 
     async def _ensure_browser(self):
@@ -435,24 +450,24 @@ class TokenBrowser:
         return self._context
 
     async def _close_browser_only(self):
-        """关闭浏览器进程（不关闭 context，供内部使用）"""
+        """关闭浏览器进程和 context，供内部使用"""
         try:
             if self._context:
                 await self._context.close()
-        except:
-            pass
+        except Exception as e:
+            debug_logger.log_warning(f"[BrowserCaptcha] Token-{self.token_id} 关闭 context 失败: {type(e).__name__}: {str(e)[:100]}")
         self._context = None
         try:
             if self._browser:
                 await self._browser.close()
-        except:
-            pass
+        except Exception as e:
+            debug_logger.log_warning(f"[BrowserCaptcha] Token-{self.token_id} 关闭 browser 失败: {type(e).__name__}: {str(e)[:100]}")
         self._browser = None
         try:
             if self._playwright:
                 await self._playwright.stop()
-        except:
-            pass
+        except Exception as e:
+            debug_logger.log_warning(f"[BrowserCaptcha] Token-{self.token_id} 停止 playwright 失败: {type(e).__name__}: {str(e)[:100]}")
         self._playwright = None
         self._request_count = 0
 
@@ -486,8 +501,8 @@ class TokenBrowser:
                 if await textarea.is_visible(timeout=500):
                     await textarea.click()
                     await asyncio.sleep(random.uniform(0.2, 0.5))
-            except Exception:
-                pass
+            except Exception as e:
+                debug_logger.log_debug(f"[BrowserCaptcha] Token-{self.token_id} 点击 textarea 失败: {type(e).__name__}")
 
             # 最后再移一下鼠标
             await page.mouse.move(
@@ -496,9 +511,9 @@ class TokenBrowser:
                 steps=random.randint(3, 6)
             )
             await asyncio.sleep(random.uniform(0.3, 0.8))
-        except Exception:
-            # 行为模拟失败不影响主流程
-            pass
+        except Exception as e:
+            # 行为模拟失败不影响主流程，但记录日志便于调试
+            debug_logger.log_debug(f"[BrowserCaptcha] Token-{self.token_id} 行为模拟失败: {type(e).__name__}: {str(e)[:100]}")
 
     async def _execute_captcha(self, context, project_id: str, website_key: str, action: str) -> Optional[str]:
         """在给定 context 中执行打码逻辑"""
@@ -610,42 +625,57 @@ class TokenBrowser:
             return None
         finally:
             if page:
-                try: await page.close()
-                except: pass
+                try:
+                    await page.close()
+                except Exception as e:
+                    debug_logger.log_warning(f"[BrowserCaptcha] Token-{self.token_id} 关闭页面失败: {type(e).__name__}: {str(e)[:100]}")
     
     async def get_token(self, project_id: str, website_key: str, action: str = "IMAGE_GENERATION") -> Optional[str]:
-        """获取 Token：复用持久化浏览器上下文"""
-        async with self._semaphore:
-            MAX_RETRIES = 3
+        """获取 Token：复用持久化浏览器上下文
 
-            for attempt in range(MAX_RETRIES):
-                try:
-                    start_ts = time.time()
+        Args:
+            project_id: Flow 项目 ID
+            website_key: reCAPTCHA website key
+            action: reCAPTCHA action 名称，默认 "IMAGE_GENERATION"
 
-                    context = await self._get_or_create_context()
+        Returns:
+            成功时返回 reCAPTCHA token 字符串，失败返回 None
 
-                    # 执行打码
-                    token = await self._execute_captcha(context, project_id, website_key, action)
+        Note:
+            - 最多重试 3 次
+            - 异常时重建浏览器进程
+            - 并发控制由服务层的 semaphore 管理
+        """
+        MAX_RETRIES = 3
 
-                    if token:
-                        self._solve_count += 1
-                        debug_logger.log_info(f"[BrowserCaptcha] Token-{self.token_id} 获取成功 ({(time.time()-start_ts)*1000:.0f}ms)")
-                        return token
+        for attempt in range(MAX_RETRIES):
+            try:
+                start_ts = time.time()
 
-                    self._error_count += 1
-                    debug_logger.log_warning(f"[BrowserCaptcha] Token-{self.token_id} 尝试 {attempt+1}/{MAX_RETRIES} 失败")
+                context = await self._get_or_create_context()
 
-                except Exception as e:
-                    self._error_count += 1
-                    debug_logger.log_error(f"[BrowserCaptcha] Token-{self.token_id} 浏览器错误: {type(e).__name__}: {str(e)[:200]}")
-                    # 浏览器异常时强制重建
-                    await self._close_browser_only()
+                # 执行打码
+                token = await self._execute_captcha(context, project_id, website_key, action)
 
-                # 重试前等待
-                if attempt < MAX_RETRIES - 1:
-                    await asyncio.sleep(1)
+                if token:
+                    self._solve_count += 1
+                    debug_logger.log_info(f"[BrowserCaptcha] Token-{self.token_id} 获取成功 ({(time.time()-start_ts)*1000:.0f}ms)")
+                    return token
 
-            return None
+                self._error_count += 1
+                debug_logger.log_warning(f"[BrowserCaptcha] Token-{self.token_id} 尝试 {attempt+1}/{MAX_RETRIES} 失败")
+
+            except Exception as e:
+                self._error_count += 1
+                debug_logger.log_error(f"[BrowserCaptcha] Token-{self.token_id} 浏览器错误: {type(e).__name__}: {str(e)[:200]}")
+                # 浏览器异常时强制重建
+                await self._close_browser_only()
+
+            # 重试前等待
+            if attempt < MAX_RETRIES - 1:
+                await asyncio.sleep(1)
+
+        return None
     
 
 class BrowserCaptchaService:
@@ -681,12 +711,12 @@ class BrowserCaptchaService:
     
     @classmethod
     async def get_instance(cls, db=None) -> 'BrowserCaptchaService':
-        if cls._instance is None:
-            async with cls._lock:
-                if cls._instance is None:
-                    cls._instance = cls(db)
-                    # 从数据库加载 browser_count 配置
-                    await cls._instance._load_browser_count()
+        # 直接获取锁，避免竞态条件
+        async with cls._lock:
+            if cls._instance is None:
+                cls._instance = cls(db)
+                # 在锁内完成初始化（包括异步操作）
+                await cls._instance._load_browser_count()
         return cls._instance
     
     def _check_available(self):
@@ -806,9 +836,12 @@ class BrowserCaptchaService:
 
     async def report_error(self, browser_id: int = None):
         """上层举报：Token 无效（统计用）
-        
+
         Args:
-            browser_id: 浏览器 ID（当前架构下每次都是新浏览器，此参数仅用于日志）
+            browser_id: 浏览器 ID（用于日志记录和错误追踪）
+
+        Note:
+            当前使用持久化浏览器架构，browser_id 用于标识哪个浏览器实例产生了无效 token
         """
         async with self._browsers_lock:
             self._stats["api_403"] += 1
@@ -816,12 +849,21 @@ class BrowserCaptchaService:
                 debug_logger.log_info(f"[BrowserCaptcha] 浏览器 {browser_id} 的 token 验证失败")
 
     async def remove_browser(self, browser_id: int):
+        """移除指定浏览器实例并关闭其资源
+
+        Args:
+            browser_id: 要移除的浏览器 ID
+
+        Note:
+            此方法会调用 browser.close() 清理资源
+        """
         async with self._browsers_lock:
             browser = self._browsers.pop(browser_id, None)
             if browser:
                 await browser.close()
 
     async def close(self):
+        """关闭所有浏览器实例并清理资源"""
         async with self._browsers_lock:
             for browser in self._browsers.values():
                 await browser.close()
